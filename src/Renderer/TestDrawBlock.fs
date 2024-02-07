@@ -91,6 +91,8 @@ module HLPTick3 =
     open Sheet.SheetInterface
     open GenerateData
     open TestLib
+    open SymbolResizeHelpers
+    open Symbol
 
     /// create an initial empty Sheet Model 
     let initSheetModel = DiagramMainView.init().Sheet
@@ -107,6 +109,7 @@ module HLPTick3 =
     /// allowed max X or y coord of svg canvas
     let maxSheetCoord = Sheet.Constants.defaultCanvasSize
     let middleOfSheet = {X=maxSheetCoord/2.;Y=maxSheetCoord/2.}
+    let quarterOfSheet = {X=maxSheetCoord/4.;Y=maxSheetCoord/4.}
 
     /// Used throughout to compare labels since these are case invariant "g1" = "G1"
     let caseInvariantEqual str1 str2 =
@@ -233,15 +236,31 @@ module HLPTick3 =
                     }
                 placeSymbol symLabel (Custom ccType) position model
             
-        
+
+        let getSymbol (symLabel: string) (model: SheetT.Model) = 
+            mapValues model.Wire.Symbol.Symbols 
+            |> Array.tryFind (fun sym -> caseInvariantEqual sym.Component.Label symLabel)
+            |> function | Some x -> Ok x
+                        | None -> Error $"Can't find symbol with label {symLabel}"
 
         // Rotate a symbol
         let rotateSymbol (symLabel: string) (rotate: Rotation) (model: SheetT.Model) : (SheetT.Model) =
-            failwithf "Not Implemented"
+            match getSymbol symLabel model with
+            | Ok sym -> 
+                let rotatedSym = rotateSymbol rotate sym
+                model 
+                |> Optic.set (symbolModel_ >-> SymbolT.symbolOf_ rotatedSym.Id) rotatedSym
+            | Error msg -> model
 
         // Flip a symbol
-        let flipSymbol (symLabel: string) (flip: SymbolT.FlipType) (model: SheetT.Model) : (SheetT.Model) =
-            failwithf "Not Implemented"
+        let flipSymbol (symLabel: string) (flip: SymbolT.FlipType) (model: SheetT.Model) : SheetT.Model =
+            match getSymbol symLabel model with
+            | Ok sym -> 
+                let flippedSym = flipSymbol flip sym
+                model 
+                |> Optic.set (symbolModel_ >-> SymbolT.symbolOf_ flippedSym.Id) flippedSym
+            | Error msg -> model
+            
 
         /// Add a (newly routed) wire, source specifies the Output port, target the Input port.
         /// Return an error if either of the two ports specified is invalid, or if the wire duplicates and existing one.
@@ -329,6 +348,51 @@ module HLPTick3 =
         fromList [-100..20..100]
         |> map (fun n -> middleOfSheet + {X=float n; Y=0.})
 
+    let gridPositions =
+        let axis = 
+            [(middleOfSheet.X-100.)..(20.)..(middleOfSheet.X+100.)]
+            |> fromList
+            |> toArray
+            |> shuffleA
+            |> fromArray
+        product(fun x y -> {X=x; Y=y}) axis axis
+        // let getGridRow y = 
+        //     toList (map (fun x -> centrePos + {X = float x; Y = float y}) y_axis)
+        // [-100..20..100]
+        // |> List.collect getGridRow
+        // |> fromList
+
+    let overlapComponentsFilter (pos: XYPos) :bool = 
+        let model = 
+            initSheetModel
+            |> placeSymbol "G1" (GateN(And,2)) pos
+            |> Result.bind (placeSymbol "FF1" DFF middleOfSheet)
+            |> getOkOrFail
+        let boxes =
+            mapValues model.BoundingBoxes
+            |> Array.toList
+            |> List.mapi (fun n box -> n,box)            
+        let b1, b2 = 
+            List.allPairs boxes boxes 
+            |> List.find (fun ((n1,box1),(n2,box2)) -> (n1 <> n2))
+            |> (fun ((n1,box1),(n2,box2)) -> 
+                {box1 with TopLeft = box1.TopLeft + pos},
+                {box2 with TopLeft = box2.TopLeft + pos})
+        not (BlockHelpers.overlap2DBox b1 b2)
+
+    let filteredGridPositions = filter overlapComponentsFilter gridPositions
+
+    let randomChoose (list: 'a list) =
+        let index = random.Next(0, List.length list)
+        List.item index list
+    let randomFlipandRotate (symLabel: string) (model: SheetT.Model) : SheetT.Model =
+        let rotation = randomChoose [Degree90;Degree270]
+        let flip = randomChoose [SymbolT.FlipHorizontal]
+        // this way to work around the fact that rotateSymbol can only handle 90 degrees
+        model
+        |> rotateSymbol symLabel rotation
+        |> flipSymbol symLabel flip
+ 
     /// demo test circuit consisting of a DFF & And gate
     let makeTest1Circuit (andPos:XYPos) =
         initSheetModel
@@ -338,6 +402,17 @@ module HLPTick3 =
         |> Result.bind (placeWire (portOf "FF1" 0) (portOf "G1" 0) )
         |> getOkOrFail
 
+    let makeTest5Circuit (andPos:XYPos) =
+        initSheetModel
+        |> placeSymbol "G1" (GateN(And,2)) andPos
+        |> Result.bind (placeSymbol "FF1" DFF middleOfSheet)
+        |> getOkOrFail
+        |> randomFlipandRotate "G1"  
+        |> randomFlipandRotate "FF1"  
+        |> placeWire (portOf "G1" 0) (portOf "FF1" 0)
+        |> Result.bind (placeWire (portOf "FF1" 0) (portOf "G1" 0) )
+        |> getOkOrFail
+        
 
 
 //------------------------------------------------------------------------------------------------//
@@ -381,6 +456,7 @@ module HLPTick3 =
             |> List.exists (fun ((n1,box1),(n2,box2)) -> (n1 <> n2) && BlockHelpers.overlap2DBox box1 box2)
             |> (function | true -> Some $"Symbol outline intersects another symbol outline in Sample {sample}"
                          | false -> None)
+
 
 
 
@@ -445,6 +521,45 @@ module HLPTick3 =
                 Asserts.failOnAllTests
                 dispatch
             |> recordPositionInTest testNum dispatch
+        
+        let test5 testNum firstSample dispatch =
+            runTestOnSheets
+                "filtered positioned AND + DFF: fail on all tests"
+                firstSample
+                filteredGridPositions
+                makeTest1Circuit
+                Asserts.failOnAllTests
+                dispatch
+            |> recordPositionInTest testNum dispatch
+        
+        let test6 testNum firstSample dispatch =
+            runTestOnSheets
+                "filtered positioned AND + DFF: fail on wire intersecting symbol"
+                firstSample
+                filteredGridPositions
+                makeTest1Circuit
+                Asserts.failOnWireIntersectsSymbol
+                dispatch
+            |> recordPositionInTest testNum dispatch
+
+        let test7 testNum firstSample dispatch =
+            runTestOnSheets
+                "filtered positioned and flip+rotated: fail on all test"
+                firstSample
+                filteredGridPositions
+                makeTest5Circuit
+                Asserts.failOnAllTests
+                dispatch
+            |> recordPositionInTest testNum dispatch
+        let test8 testNum firstSample dispatch =
+            runTestOnSheets
+                "filtered positioned and flip+rotated AND + DFF: fail on wire intersecting symbol"
+                firstSample
+                filteredGridPositions
+                makeTest5Circuit
+                Asserts.failOnWireIntersectsSymbol
+                dispatch
+            |> recordPositionInTest testNum dispatch
 
         /// List of tests available which can be run ftom Issie File Menu.
         /// The first 9 tests can also be run via Ctrl-n accelerator keys as shown on menu
@@ -456,10 +571,10 @@ module HLPTick3 =
                 "Test2", test2 // example
                 "Test3", test3 // example
                 "Test4", test4 
-                "Test5", fun _ _ _ -> printf "Test5" // dummy test - delete line or replace by real test as needed
-                "Test6", fun _ _ _ -> printf "Test6"
-                "Test7", fun _ _ _ -> printf "Test7"
-                "Test8", fun _ _ _ -> printf "Test8"
+                "Test5", test5 
+                "Test6", test6
+                "Test7", test7
+                "Test8", test8
                 "Next Test Error", fun _ _ _ -> printf "Next Error:" // Go to the nexterror in a test
 
             ]
