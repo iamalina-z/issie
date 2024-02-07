@@ -242,12 +242,16 @@ module HLPTick3 =
             |> Array.tryFind (fun sym -> caseInvariantEqual sym.Component.Label symLabel)
             |> function | Some x -> Ok x
                         | None -> Error $"Can't find symbol with label {symLabel}"
-
+        
+        let workAroundRotate180 (sym) = rotateAntiClockByAng Degree180 sym
+        let workAroundFlipVertical (sym) = flipSymbol SymbolT.FlipHorizontal (workAroundRotate180 sym)
         // Rotate a symbol
         let rotateSymbol (symLabel: string) (rotate: Rotation) (model: SheetT.Model) : (SheetT.Model) =
             match getSymbol symLabel model with
             | Ok sym -> 
-                let rotatedSym = rotateSymbol rotate sym
+                let rotatedSym =
+                    if rotate = Degree180 then workAroundRotate180 sym
+                    else rotateSymbol rotate sym
                 model 
                 |> Optic.set (symbolModel_ >-> SymbolT.symbolOf_ rotatedSym.Id) rotatedSym
             | Error msg -> model
@@ -256,7 +260,9 @@ module HLPTick3 =
         let flipSymbol (symLabel: string) (flip: SymbolT.FlipType) (model: SheetT.Model) : SheetT.Model =
             match getSymbol symLabel model with
             | Ok sym -> 
-                let flippedSym = flipSymbol flip sym
+                let flippedSym = 
+                    if flip = SymbolT.FlipVertical then workAroundFlipVertical sym
+                    else flipSymbol flip sym
                 model 
                 |> Optic.set (symbolModel_ >-> SymbolT.symbolOf_ flippedSym.Id) flippedSym
             | Error msg -> model
@@ -349,18 +355,12 @@ module HLPTick3 =
         |> map (fun n -> middleOfSheet + {X=float n; Y=0.})
 
     let gridPositions =
+        let axisArray = [|(middleOfSheet.X-100.)..(20.)..(middleOfSheet.X+100.)|]
         let axis = 
-            [(middleOfSheet.X-100.)..(20.)..(middleOfSheet.X+100.)]
-            |> fromList
-            |> toArray
+            axisArray
             |> shuffleA
             |> fromArray
         product(fun x y -> {X=x; Y=y}) axis axis
-        // let getGridRow y = 
-        //     toList (map (fun x -> centrePos + {X = float x; Y = float y}) y_axis)
-        // [-100..20..100]
-        // |> List.collect getGridRow
-        // |> fromList
 
     let overlapComponentsFilter (pos: XYPos) :bool = 
         let model = 
@@ -374,10 +374,8 @@ module HLPTick3 =
             |> List.mapi (fun n box -> n,box)            
         let b1, b2 = 
             List.allPairs boxes boxes 
-            |> List.find (fun ((n1,box1),(n2,box2)) -> (n1 <> n2))
-            |> (fun ((n1,box1),(n2,box2)) -> 
-                {box1 with TopLeft = box1.TopLeft + pos},
-                {box2 with TopLeft = box2.TopLeft + pos})
+            |> List.find (fun ((n1, _), (n2, _)) -> n1 <> n2)
+            |> (fun ((_, box1), (_, box2)) -> box1, box2)
         not (BlockHelpers.overlap2DBox b1 b2)
 
     let filteredGridPositions = filter overlapComponentsFilter gridPositions
@@ -386,9 +384,8 @@ module HLPTick3 =
         let index = random.Next(0, List.length list)
         List.item index list
     let randomFlipandRotate (symLabel: string) (model: SheetT.Model) : SheetT.Model =
-        let rotation = randomChoose [Degree90;Degree270]
-        let flip = randomChoose [SymbolT.FlipHorizontal]
-        // this way to work around the fact that rotateSymbol can only handle 90 degrees
+        let rotation = randomChoose [Degree90; Degree180; Degree270]
+        let flip = randomChoose [SymbolT.FlipHorizontal; SymbolT.FlipVertical]
         model
         |> rotateSymbol symLabel rotation
         |> flipSymbol symLabel flip
@@ -490,13 +487,23 @@ module HLPTick3 =
             |> recordPositionInTest testNum dispatch
 
         /// Example test: Horizontally positioned AND + DFF: fail on sample 10
+        // let test2 testNum firstSample dispatch =
+        //     runTestOnSheets
+        //         "Horizontally positioned AND + DFF: fail on sample 10"
+        //         firstSample
+        //         horizLinePositions
+        //         makeTest1Circuit
+        //         (Asserts.failOnSampleNumber 10)
+        //         dispatch
+        //     |> recordPositionInTest testNum dispatch
+
         let test2 testNum firstSample dispatch =
             runTestOnSheets
-                "Horizontally positioned AND + DFF: fail on sample 10"
+                "flip+rotated AND + DFF: fail on all test"
                 firstSample
                 horizLinePositions
-                makeTest1Circuit
-                (Asserts.failOnSampleNumber 10)
+                makeTest5Circuit
+                Asserts.failOnAllTests
                 dispatch
             |> recordPositionInTest testNum dispatch
 
@@ -544,11 +551,11 @@ module HLPTick3 =
 
         let test7 testNum firstSample dispatch =
             runTestOnSheets
-                "filtered positioned and flip+rotated: fail on all test"
+                "filtered positioned and flip+rotated: fail on symbol intersect symbol"
                 firstSample
                 filteredGridPositions
                 makeTest5Circuit
-                Asserts.failOnAllTests
+                Asserts.failOnSymbolIntersectsSymbol
                 dispatch
             |> recordPositionInTest testNum dispatch
         let test8 testNum firstSample dispatch =
@@ -561,6 +568,7 @@ module HLPTick3 =
                 dispatch
             |> recordPositionInTest testNum dispatch
 
+
         /// List of tests available which can be run ftom Issie File Menu.
         /// The first 9 tests can also be run via Ctrl-n accelerator keys as shown on menu
         let testsToRunFromSheetMenu : (string * (int -> int -> Dispatch<Msg> -> Unit)) list =
@@ -568,7 +576,7 @@ module HLPTick3 =
             // delete unused tests from list
             [
                 "Test1", test1 // example
-                "Test2", test2 // example
+                "Test2", test2 
                 "Test3", test3 // example
                 "Test4", test4 
                 "Test5", test5 
